@@ -1,16 +1,28 @@
-"""Entrena la CNN con MNIST y deformaciones para reconocer dígitos mal escritos.
+"""Entrena la CNN con MNIST + EMNIST Digits y deformaciones para reconocer dígitos mal escritos.
+
+Datos: MNIST (70.000 dígitos) y EMNIST Digits del NIST (280.000 dígitos de otras
+personas, se descarga la primera vez, ~560 MB).
 
 Cada imagen de entrenamiento se deforma al azar: en espejo, volteada, girada,
 inclinada, desplazada, con zoom y con trazo más grueso o más delgado.
 Los 6 y 9 no se voltean de arriba abajo porque se confundirían entre sí.
+
+Uso:
+    python train_model.py              # entrena desde cero
+    python train_model.py --fine-tune  # continúa desde numerosC2.keras (más rápido)
 """
 
+import argparse
+import gzip
+import zipfile
 from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
 
 
+MODEL_PATH = Path(__file__).resolve().parent / "numerosC2.keras"
+EMNIST_URL = "https://biometrics.nist.gov/cs_links/EMNIST/gzip.zip"
 BATCH_SIZE = 128
 MIRROR_PROBABILITY = 0.3
 UPSIDE_DOWN_PROBABILITY = 0.2
@@ -90,41 +102,88 @@ def build_model() -> tf.keras.Model:
     )
 
 
+def read_idx(path: Path) -> np.ndarray:
+    with gzip.open(path, "rb") as file:
+        data = file.read()
+    dimensions = data[3]
+    shape = [int.from_bytes(data[4 + 4 * i: 8 + 4 * i], "big") for i in range(dimensions)]
+    return np.frombuffer(data, dtype=np.uint8, offset=4 + 4 * dimensions).reshape(shape)
+
+
+def load_emnist_digits() -> tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]:
+    archive = Path(tf.keras.utils.get_file("emnist-gzip.zip", EMNIST_URL))
+    folder = archive.parent / "emnist-digits"
+    folder.mkdir(exist_ok=True)
+    splits = {}
+    for split in ("train", "test"):
+        arrays = []
+        for kind in ("images-idx3", "labels-idx1"):
+            name = f"emnist-digits-{split}-{kind}-ubyte.gz"
+            if not (folder / name).exists():
+                with zipfile.ZipFile(archive) as zipped:
+                    (folder / name).write_bytes(zipped.read(f"gzip/{name}"))
+            arrays.append(read_idx(folder / name))
+        images, labels = arrays
+        # EMNIST guarda las imágenes transpuestas respecto a MNIST.
+        splits[split] = (images.transpose(0, 2, 1), labels)
+    return splits["train"], splits["test"]
+
+
+def to_model_input(images: np.ndarray) -> np.ndarray:
+    return images.astype(np.float32)[..., np.newaxis] / 255.0
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fine-tune", action="store_true", help="continúa desde el modelo guardado")
+    parser.add_argument("--epochs", type=int, default=12)
+    args = parser.parse_args()
     tf.keras.utils.set_random_seed(42)
 
-    (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
-    x_train = x_train.astype(np.float32)[..., np.newaxis] / 255.0
-    x_test = x_test.astype(np.float32)[..., np.newaxis] / 255.0
+    (mnist_x, mnist_y), (mnist_test_x, mnist_test_y) = tf.keras.datasets.mnist.load_data()
+    (emnist_x, emnist_y), (emnist_test_x, emnist_test_y) = load_emnist_digits()
+    x_train = to_model_input(np.concatenate([mnist_x, emnist_x]))
+    y_train = np.concatenate([mnist_y, emnist_y]).astype(np.int32)
+    x_test = to_model_input(np.concatenate([mnist_test_x, emnist_test_x]))
+    y_test = np.concatenate([mnist_test_y, emnist_test_y]).astype(np.int32)
+    print(f"Entrenando con {len(x_train):,} dígitos, validando con {len(x_test):,}")
 
     train_data = (
-        tf.data.Dataset.from_tensor_slices((x_train, y_train.astype(np.int32)))
+        tf.data.Dataset.from_tensor_slices((x_train, y_train))
         .shuffle(len(x_train))
         .batch(BATCH_SIZE)
         .map(augment, num_parallel_calls=tf.data.AUTOTUNE)
         .prefetch(tf.data.AUTOTUNE)
     )
 
-    model = build_model()
+    if args.fine_tune:
+        model = tf.keras.models.load_model(MODEL_PATH)
+        learning_rate = 3e-4
+    else:
+        model = build_model()
+        learning_rate = 1e-3
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(1e-3),
+        optimizer=tf.keras.optimizers.Adam(learning_rate),
         loss=tf.keras.losses.SparseCategoricalCrossentropy(),
         metrics=["accuracy"],
     )
     model.fit(
         train_data,
-        epochs=12,
+        epochs=args.epochs,
         validation_data=(x_test, y_test),
         callbacks=[
-            tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2),
-            tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True),
+            tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=1),
+            tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True),
         ],
     )
 
-    test_loss, test_accuracy = model.evaluate(x_test, y_test, verbose=0)
-    model_path = Path(__file__).resolve().parent / "numerosC2.keras"
-    model.save(model_path)
-    print(f"Precisión en MNIST test: {test_accuracy:.2%} — modelo guardado en {model_path.name}")
+    _, mnist_accuracy = model.evaluate(to_model_input(mnist_test_x), mnist_test_y, verbose=0)
+    _, emnist_accuracy = model.evaluate(to_model_input(emnist_test_x), emnist_test_y, verbose=0)
+    model.save(MODEL_PATH)
+    print(
+        f"Precisión en MNIST test: {mnist_accuracy:.2%}, EMNIST test: {emnist_accuracy:.2%} "
+        f"— modelo guardado en {MODEL_PATH.name}"
+    )
 
 
 if __name__ == "__main__":

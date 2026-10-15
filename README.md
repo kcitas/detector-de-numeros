@@ -1,7 +1,7 @@
 # Detector de números
 
 Aplicación web en Streamlit que reconoce dígitos manuscritos del 0 al 9 con una
-CNN entrenada con MNIST (`numerosC2.keras`). El modelo se entrenó con
+CNN entrenada con MNIST y EMNIST Digits (300.000 dígitos, `numerosC2.keras`). El modelo se entrenó con
 deformaciones (dígitos en espejo, volteados, girados, inclinados, gruesos y
 delgados), así que también reconoce números mal escritos. La interfaz tiene tema oscuro,
 panel lateral para elegir la entrada y resultados en dos columnas con barras de
