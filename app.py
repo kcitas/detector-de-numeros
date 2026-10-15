@@ -26,7 +26,9 @@ st.markdown(
         border-radius: 16px;
         padding: 1.5rem;
         text-align: center;
+        color: #E8EAF0;
     }
+    .result-card b { color: #FFFFFF; }
     .result-card .label { color: #9AA3B5; font-size: 0.9rem; letter-spacing: 0.08em; }
     .result-card .digit { font-size: 6rem; font-weight: 800; line-height: 1.1; color: #F5B700; }
     .result-card .confidence { font-size: 1.1rem; }
