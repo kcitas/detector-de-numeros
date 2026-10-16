@@ -4,7 +4,8 @@ Datos: MNIST (70.000 dígitos) y EMNIST Digits del NIST (280.000 dígitos de otr
 personas, se descarga la primera vez, ~560 MB).
 
 Cada imagen de entrenamiento se deforma al azar: en espejo, volteada, girada,
-inclinada, desplazada, con zoom y con trazo más grueso o más delgado.
+inclinada, estirada (muy ancha o muy alta), temblorosa, con trazo más grueso o
+más delgado, con huecos en la línea o un poco cortada por el borde.
 Los 6 y 9 no se voltean de arriba abajo porque se confundirían entre sí.
 
 Uso:
@@ -19,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
+from scipy import ndimage
 
 
 MODEL_PATH = Path(__file__).resolve().parent / "numerosC2.keras"
@@ -26,54 +28,91 @@ EMNIST_URL = "https://biometrics.nist.gov/cs_links/EMNIST/gzip.zip"
 BATCH_SIZE = 128
 MIRROR_PROBABILITY = 0.3
 UPSIDE_DOWN_PROBABILITY = 0.2
-
-geometric_augmentation = tf.keras.Sequential(
-    [
-        tf.keras.layers.RandomRotation(0.1, fill_mode="constant"),
-        tf.keras.layers.RandomZoom((-0.2, 0.2), fill_mode="constant"),
-        tf.keras.layers.RandomTranslation(0.12, 0.12, fill_mode="constant"),
-    ]
-)
+WORK_SIZE = 48  # lienzo intermedio para que las deformaciones no se salgan del borde
 
 
-def random_shear(images: tf.Tensor) -> tf.Tensor:
-    shear = tf.random.uniform([tf.shape(images)[0], 1], -0.4, 0.4)
-    zeros = tf.zeros_like(shear)
-    ones = tf.ones_like(shear)
-    # Transformación afín [a0, a1, a2, b0, b1, b2, c0, c1] centrada en la imagen.
-    transforms = tf.concat([ones, shear, -shear * 14.0, zeros, ones, zeros, zeros, zeros], axis=1)
-    return tf.raw_ops.ImageProjectiveTransformV3(
-        images=images,
-        transforms=transforms,
-        output_shape=tf.shape(images)[1:3],
-        fill_value=0.0,
-        interpolation="BILINEAR",
-        fill_mode="CONSTANT",
-    )
+def recenter(image: np.ndarray) -> np.ndarray:
+    """Recorta el dígito y lo centra en 20×20 dentro de 28×28, igual que la app."""
+    rows, cols = np.nonzero(image > 0.2)
+    if len(rows) == 0:
+        return np.zeros((28, 28), np.float32)
+    digit = image[rows.min():rows.max() + 1, cols.min():cols.max() + 1]
+    scale = 20 / max(digit.shape)
+    digit = np.clip(ndimage.zoom(digit, scale, order=1), 0, 1)[:20, :20]
+    result = np.zeros((28, 28), np.float32)
+    top, left = (28 - digit.shape[0]) // 2, (28 - digit.shape[1]) // 2
+    result[top:top + digit.shape[0], left:left + digit.shape[1]] = digit
+    return result
 
 
-def random_stroke_width(images: tf.Tensor) -> tf.Tensor:
-    thicker = tf.nn.max_pool2d(images, ksize=3, strides=1, padding="SAME")
-    thinner = -tf.nn.max_pool2d(-images, ksize=2, strides=1, padding="SAME")
-    choice = tf.random.uniform([tf.shape(images)[0], 1, 1, 1])
-    return tf.where(choice < 0.25, thicker, tf.where(choice < 0.35, thinner, images))
+def augment_digit(image: np.ndarray, label: int, rng: np.random.Generator) -> np.ndarray:
+    """Deforma un dígito al azar para que parezca mal escrito."""
+    if rng.random() < MIRROR_PROBABILITY:
+        image = image[:, ::-1]
+    if label not in (6, 9) and rng.random() < UPSIDE_DOWN_PROBABILITY:
+        image = image[::-1, :]
+
+    # Giro, inclinación y estiramiento (muy ancho o muy alto) en una sola transformación.
+    angle = np.radians(rng.uniform(-30, 30))
+    shear = rng.uniform(-0.4, 0.4)
+    stretch = np.exp(rng.uniform(np.log(0.45), np.log(1.6), size=2)) if rng.random() < 0.4 else rng.uniform(0.85, 1.15, 2)
+    rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+    forward = rotation @ np.array([[1, 0], [shear, 1]]) @ np.diag(stretch)
+    grid = np.mgrid[0:WORK_SIZE, 0:WORK_SIZE].reshape(2, -1).astype(np.float32) - WORK_SIZE / 2
+    coords = np.linalg.inv(forward) @ grid + 14
+
+    # Trazo tembloroso u ondulado.
+    if rng.random() < 0.5:
+        alpha, sigma = rng.uniform(1.5, 3.5), rng.uniform(3, 5)
+        for axis in range(2):
+            field = ndimage.gaussian_filter(rng.uniform(-1, 1, (WORK_SIZE, WORK_SIZE)), sigma)
+            coords[axis] += (field / (np.abs(field).max() + 1e-6) * alpha).ravel()
+    image = ndimage.map_coordinates(image, coords, order=1, cval=0).reshape(WORK_SIZE, WORK_SIZE)
+
+    # Trazo más grueso o más delgado.
+    choice = rng.random()
+    if choice < 0.25:
+        image = ndimage.grey_dilation(image, size=(int(rng.integers(2, 4)),) * 2)
+    elif choice < 0.35:
+        thinner = ndimage.grey_erosion(image, size=(2, 2))
+        image = thinner if (thinner > 0.2).sum() > 15 else image
+
+    # Trazo cortado: huecos pequeños en la línea.
+    if rng.random() < 0.2:
+        rows, cols = np.nonzero(image > 0.5)
+        for index in rng.choice(len(rows), size=min(len(rows), int(rng.integers(1, 3))), replace=False):
+            size = int(rng.integers(2, 4))
+            image[rows[index] - size // 2:rows[index] + size, cols[index] - size // 2:cols[index] + size] = 0
+
+    # Número que toca el borde de la pantalla y queda un poco cortado.
+    if rng.random() < 0.1:
+        rows, cols = np.nonzero(image > 0.2)
+        if len(rows):
+            cut = rng.uniform(0.05, 0.15)
+            side = rng.integers(4)
+            if side == 0:
+                image[:rows.min() + int(cut * (rows.max() - rows.min())), :] = 0
+            elif side == 1:
+                image[rows.max() - int(cut * (rows.max() - rows.min())):, :] = 0
+            elif side == 2:
+                image[:, :cols.min() + int(cut * (cols.max() - cols.min()))] = 0
+            else:
+                image[:, cols.max() - int(cut * (cols.max() - cols.min())):] = 0
+
+    return recenter(np.clip(image, 0, 1))
 
 
-def random_flips(images: tf.Tensor, labels: tf.Tensor) -> tf.Tensor:
-    batch = tf.shape(images)[0]
-    mirror = tf.random.uniform([batch]) < MIRROR_PROBABILITY
-    can_turn = tf.logical_and(labels != 6, labels != 9)
-    upside_down = tf.logical_and(tf.random.uniform([batch]) < UPSIDE_DOWN_PROBABILITY, can_turn)
-    images = tf.where(mirror[:, None, None, None], tf.reverse(images, axis=[2]), images)
-    return tf.where(upside_down[:, None, None, None], tf.reverse(images, axis=[1]), images)
+def augment_batch(images: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    rng = np.random.default_rng()
+    return np.stack([augment_digit(image[..., 0], int(label), rng) for image, label in zip(images, labels)])[
+        ..., np.newaxis
+    ].astype(np.float32)
 
 
 def augment(images: tf.Tensor, labels: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
-    images = random_flips(images, labels)
-    images = random_shear(images)
-    images = geometric_augmentation(images, training=True)
-    images = random_stroke_width(images)
-    return tf.clip_by_value(images, 0.0, 1.0), labels
+    augmented = tf.numpy_function(augment_batch, [images, labels], tf.float32)
+    augmented.set_shape([None, 28, 28, 1])
+    return augmented, labels
 
 
 def build_model() -> tf.keras.Model:

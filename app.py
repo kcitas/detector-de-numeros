@@ -5,6 +5,7 @@ import numpy as np
 import streamlit as st
 import tensorflow as tf
 from PIL import Image, ImageOps, UnidentifiedImageError
+from scipy import ndimage
 from streamlit_drawable_canvas import st_canvas
 
 
@@ -12,6 +13,7 @@ MODEL_PATH = Path(__file__).resolve().parent / "numerosC2.keras"
 CLASS_NAMES = [str(digit) for digit in range(10)]
 CANVAS_SIZE = 300
 LOW_CONFIDENCE = 0.6
+SPECK_FRACTION = 0.08
 
 st.set_page_config(page_title="Detector de números", page_icon="✍️", layout="wide")
 
@@ -79,15 +81,31 @@ except (OSError, ValueError) as error:
     st.stop()
 
 
+def remove_specks(pixels: np.ndarray) -> np.ndarray:
+    """Borra manchas y puntos sueltos mucho más pequeños que el trazo principal."""
+    mask = pixels > 50
+    labels, count = ndimage.label(mask, structure=np.ones((3, 3)))
+    if count <= 1:
+        return pixels
+    sizes = ndimage.sum(mask, labels, index=range(1, count + 1))
+    keep = np.flatnonzero(sizes >= SPECK_FRACTION * sizes.max()) + 1
+    return np.where(np.isin(labels, keep), pixels, 0).astype(pixels.dtype)
+
+
 def to_mnist_format(image: Image.Image) -> Image.Image | None:
     """Recorta el dígito (blanco sobre negro) y lo centra en 28×28 como en MNIST."""
+    image = Image.fromarray(remove_specks(np.asarray(image)))
     digit_mask = image.point(lambda pixel: 255 if pixel > 50 else 0)
     bounding_box = digit_mask.getbbox()
     if bounding_box is None:
         return None
 
     digit = image.crop(bounding_box)
-    digit.thumbnail((20, 20), Image.Resampling.LANCZOS)
+    scale = 20 / max(digit.width, digit.height)
+    digit = digit.resize(
+        (max(1, round(digit.width * scale)), max(1, round(digit.height * scale))),
+        Image.Resampling.LANCZOS,
+    )
     mnist_image = Image.new("L", (28, 28), color=0)
     mnist_image.paste(digit, ((28 - digit.width) // 2, (28 - digit.height) // 2))
     return mnist_image
