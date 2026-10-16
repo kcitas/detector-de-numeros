@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -47,7 +48,7 @@ st.markdown(
     """
     <div class="hero">
       <h1>✍️ Detector de números</h1>
-      <p>Una red neuronal convolucional entrenada con MNIST reconoce dígitos del 0 al 9.</p>
+      <p>Una red neuronal convolucional entrenada con 300.000 dígitos (MNIST y EMNIST) reconoce del 0 al 9, incluso mal escritos.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -59,6 +60,11 @@ if not MODEL_PATH.is_file():
         "Descarga el modelo entrenado y agrégalo al repositorio."
     )
     st.stop()
+
+
+@st.cache_data
+def model_fingerprint(model_path: str) -> str:
+    return hashlib.sha256(Path(model_path).read_bytes()).hexdigest()[:8]
 
 
 @st.cache_resource
@@ -173,7 +179,10 @@ with st.sidebar:
             help="En automático se detecta si el dígito es oscuro sobre fondo claro.",
         )
     st.divider()
-    st.caption("Modelo: CNN Keras (`numerosC2.keras`) entrenada con MNIST.")
+    st.caption(
+        "Modelo: CNN Keras (`numerosC2.keras`) entrenada con MNIST y EMNIST. "
+        f"Versión: `{model_fingerprint(str(MODEL_PATH))}`"
+    )
 
 input_column, result_column = st.columns([1, 1], gap="large")
 
