@@ -56,10 +56,17 @@ def augment_digit(image: np.ndarray, label: int, rng: np.random.Generator) -> np
     angle = np.radians(rng.uniform(-30, 30))
     shear = rng.uniform(-0.4, 0.4)
     stretch = np.exp(rng.uniform(np.log(0.45), np.log(1.6), size=2)) if rng.random() < 0.4 else rng.uniform(0.85, 1.15, 2)
-    rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
-    forward = rotation @ np.array([[1, 0], [shear, 1]]) @ np.diag(stretch)
-    grid = np.mgrid[0:WORK_SIZE, 0:WORK_SIZE].reshape(2, -1).astype(np.float32) - WORK_SIZE / 2
-    coords = np.linalg.inv(forward) @ grid + 14
+    # Inversa 2×2 calculada a mano: np.linalg y las multiplicaciones de matrices usan
+    # Accelerate en macOS, que se cae (Bus error) si varios hilos lo llaman a la vez.
+    cos, sin = np.cos(angle), np.sin(angle)
+    a, b = (cos - sin * shear) * stretch[0], -sin * stretch[1]
+    c, d = (sin + cos * shear) * stretch[0], cos * stretch[1]
+    determinant = a * d - b * c
+    rows, cols = np.mgrid[0:WORK_SIZE, 0:WORK_SIZE].astype(np.float32) - WORK_SIZE / 2
+    coords = np.stack([
+        (d * rows - b * cols) / determinant + 14,
+        (-c * rows + a * cols) / determinant + 14,
+    ]).reshape(2, -1)
 
     # Trazo tembloroso u ondulado.
     if rng.random() < 0.5:
@@ -191,7 +198,7 @@ def main() -> None:
         tf.data.Dataset.from_tensor_slices((x_train, y_train))
         .shuffle(len(x_train))
         .batch(BATCH_SIZE)
-        .map(augment, num_parallel_calls=tf.data.AUTOTUNE)
+        .map(augment, num_parallel_calls=1)
         .prefetch(tf.data.AUTOTUNE)
     )
 
