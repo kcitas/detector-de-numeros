@@ -24,6 +24,16 @@ Al final del panel lateral aparece la **versión del modelo** (los primeros 8
 caracteres del SHA-256 de `numerosC2.keras`), para comprobar qué modelo está
 desplegado.
 
+### Ejemplos con imágenes subidas
+
+Dos imágenes de prueba (dígito negro sobre fondo blanco) subidas con la opción
+**Subir imagen**:
+
+| Imagen subida | Resultado en la app |
+|---|---|
+| ![Dígito 3](docs/digito_3.png) | ![Resultado: 3 con 100 % de confianza](docs/resultado_3.png) |
+| ![Dígito 7](docs/digito_7.png) | ![Resultado: 7 con 100 % de confianza](docs/resultado_7.png) |
+
 ## Cómo funciona
 
 ### Preprocesamiento (`app.py`)
